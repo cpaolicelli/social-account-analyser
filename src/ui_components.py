@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import json
 
 def render_login():
     st.title("Login")
@@ -53,6 +54,20 @@ def render_comments_stats(comments, cost):
     st.subheader("Analysis Results")
     st.write(f"Total Comments Scanned: {len(comments)}")
     st.write(f"Run Cost: ${cost:.4f}")
+    
+    if comments:
+        # Convert to JSON string
+        comments_json = json.dumps(comments, indent=2)
+        
+        st.download_button(
+            label="Download Comments JSON",
+            data=comments_json,
+            file_name="comments_data.json",
+            mime="application/json"
+        )
+        
+        with st.expander("View Comments Data"):
+            st.dataframe(pd.DataFrame(comments))
     
     # Placeholder for actual toxicity analysis
     st.info("Toxicity integration pending...")

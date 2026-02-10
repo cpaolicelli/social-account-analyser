@@ -74,51 +74,51 @@ def main():
             
             st.divider()
             
-            # Toxicity Analysis Section (Hidden for now)
-            # col1, col2 = st.columns([1, 4])
-            # with col1:
-            #     if st.button("Start Toxicity Analysis"):
-            #         st.session_state.show_toxicity_modal = True
+            Toxicity Analysis Section (Hidden for now)
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if st.button("Start Toxicity Analysis"):
+                    st.session_state.show_toxicity_modal = True
 
-            # if st.session_state.get("show_toxicity_modal"):
-            #     with st.container():
-            #         st.markdown("### Configure Toxicity Analysis")
+            if st.session_state.get("show_toxicity_modal"):
+                with st.container():
+                    st.markdown("### Configure Toxicity Analysis")
                     
-            #         # Calculate max comments available
-            #         total_comments_available = sum(p.get('commentsCount', 0) for p in st.session_state.posts_data)
+                    # Calculate max comments available
+                    total_comments_available = sum(p.get('commentsCount', 0) for p in st.session_state.posts_data)
                     
-            #         if total_comments_available == 0:
-            #             st.warning("No comments found to analyze.")
-            #         else:
-            #             comments_to_scan = st.number_input(
-            #                 "Number of comments to analyze", 
-            #                 min_value=1, 
-            #                 max_value=total_comments_available, 
-            #                 value=min(100, total_comments_available),
-            #                 step=10
-            #             )
+                    if total_comments_available == 0:
+                        st.warning("No comments found to analyze.")
+                    else:
+                        comments_to_scan = st.number_input(
+                            "Number of comments to analyze", 
+                            min_value=1, 
+                            max_value=total_comments_available, 
+                            value=min(100, total_comments_available),
+                            step=10
+                        )
                         
-            #             estimated_cost = (comments_to_scan / 1000) * 4
-            #             st.write(f"**Estimated Cost:** ${estimated_cost:.4f}")
+                        estimated_cost = (comments_to_scan / 1000) * 4
+                        st.write(f"**Estimated Cost:** ${estimated_cost:.4f}")
                         
-            #             if st.button("Start Analysis"):
-            #                 st.session_state.show_toxicity_modal = False # Close modal
-            #                 with st.spinner("Fetching comments..."):
-            #                     # Logic to select posts until comment limit is reached
-            #                     target_posts_urls = []
-            #                     accumulated_comments = 0
-            #                     
-            #                     for post in st.session_state.posts_data:
-            #                         if accumulated_comments >= comments_to_scan:
-            #                             break
-            #                         
-            #                         post_comments = post.get('commentsCount', 0)
-            #                         if post_comments > 0:
-            #                             target_posts_urls.append(post['url'])
-            #                             accumulated_comments += post_comments
-            #                     
-            #                     comments, cost = fetch_instagram_comments(target_posts_urls, comments_to_scan)
-            #                     render_comments_stats(comments, cost)
+                        if st.button("Start Analysis"):
+                            st.session_state.show_toxicity_modal = False # Close modal
+                            with st.spinner("Fetching comments..."):
+                                # Logic to select posts until comment limit is reached
+                                target_posts_urls = []
+                                accumulated_comments = 0
+                                
+                                for post in st.session_state.posts_data:
+                                    if accumulated_comments >= comments_to_scan:
+                                        break
+                                    
+                                    post_comments = post.get('commentsCount', 0)
+                                    if post_comments > 0:
+                                        target_posts_urls.append(post['url'])
+                                        accumulated_comments += post_comments
+                                
+                                comments, cost = fetch_instagram_comments(target_posts_urls, comments_to_scan)
+                                render_comments_stats(comments, cost)
 
 
 if __name__ == "__main__":
