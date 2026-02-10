@@ -1,0 +1,7 @@
+streamlit
+firebase-admin
+apify-client
+pandas
+python-dotenv
+requests
+extra-streamlit-components
