@@ -74,7 +74,7 @@ def main():
             
             st.divider()
             
-            Toxicity Analysis Section (Hidden for now)
+            # Toxicity Analysis Section (Hidden for now)
             col1, col2 = st.columns([1, 4])
             with col1:
                 if st.button("Start Toxicity Analysis"):
