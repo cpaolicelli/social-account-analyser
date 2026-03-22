@@ -149,7 +149,7 @@ def render_comments_stats(comments, cost):
     st.info("Toxicity integration pending...")
 
 
-def render_history(post_runs, comment_runs, fetch_dataset_fn):
+def render_history(post_runs, comment_runs, fetch_dataset_fn, fetch_items_fn, fetch_comments_fn):
     """Render the scraping history in the main content area."""
 
     # Inject CSS for colored run cards
@@ -191,13 +191,13 @@ def render_history(post_runs, comment_runs, fetch_dataset_fn):
     tab_posts, tab_comments = st.tabs(["Posts Scraping", "Comments Scraping"])
 
     with tab_posts:
-        _render_run_list(post_runs, "posts", fetch_dataset_fn)
+        _render_run_list(post_runs, "posts", fetch_dataset_fn, fetch_items_fn, fetch_comments_fn)
 
     with tab_comments:
         _render_run_list(comment_runs, "comments", fetch_dataset_fn)
 
 
-def _render_run_list(runs, run_type, fetch_dataset_fn):
+def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetch_comments_fn=None):
     if not runs:
         st.info(f"No {run_type} scraping history found.")
         return
@@ -206,6 +206,11 @@ def _render_run_list(runs, run_type, fetch_dataset_fn):
     cache_key = f"_csv_cache_{run_type}"
     if cache_key not in st.session_state:
         st.session_state[cache_key] = {}
+
+    # Session state key for cached post items (for comment scraping)
+    posts_cache_key = "_posts_items_cache"
+    if posts_cache_key not in st.session_state:
+        st.session_state[posts_cache_key] = {}
 
     for i, run in enumerate(runs):
         started = run["started_at"]
@@ -284,3 +289,83 @@ def _render_run_list(runs, run_type, fetch_dataset_fn):
                                     st.rerun()
                                 else:
                                     st.warning("Dataset is empty.")
+
+            # --- Comment scraping from post runs ---
+            if run_type == "posts" and status == "SUCCEEDED" and fetch_items_fn and fetch_comments_fn:
+                run_id = run["run_id"]
+                st.divider()
+
+                # Load posts button
+                if run_id not in st.session_state[posts_cache_key]:
+                    if st.button("Load Posts for Comment Scraping", key=f"load_posts_{run_id}_{i}"):
+                        with st.spinner("Loading posts from this run..."):
+                            items = fetch_items_fn(run["dataset_id"])
+                            if items:
+                                st.session_state[posts_cache_key][run_id] = items
+                                st.rerun()
+                            else:
+                                st.warning("No posts found in this dataset.")
+                else:
+                    posts = st.session_state[posts_cache_key][run_id]
+                    total_comments = sum(p.get("commentsCount", 0) for p in posts)
+
+                    st.markdown(f"**{len(posts)} posts** — {total_comments} total comments available")
+
+                    # Select all / deselect all
+                    select_all_key = f"select_all_{run_id}"
+
+                    def _toggle_all(rid=run_id, n=len(posts)):
+                        val = st.session_state[f"select_all_{rid}"]
+                        for idx in range(n):
+                            st.session_state[f"post_cb_{rid}_{idx}"] = val
+
+                    select_all = st.checkbox("Select all", value=True, key=select_all_key, on_change=_toggle_all)
+
+                    # Render each post with checkbox
+                    selected_urls = []
+                    selected_comments_count = 0
+                    for j, post in enumerate(posts):
+                        post_url = post.get("url", "")
+                        shortcode = post.get("shortCode", post_url.split("/")[-2] if "/p/" in post_url else "")
+                        likes = post.get("likesCount", 0)
+                        comments = post.get("commentsCount", 0)
+                        caption = post.get("caption", "") or ""
+                        caption_preview = (caption[:60] + "...") if len(caption) > 60 else caption
+
+                        cb_key = f"post_cb_{run_id}_{j}"
+                        if cb_key not in st.session_state:
+                            st.session_state[cb_key] = True
+
+                        checked = st.checkbox(
+                            f"📷 `{shortcode}` — ❤️ {likes} — 💬 {comments} — {caption_preview}",
+                            key=cb_key,
+                        )
+                        if checked and post_url and comments > 0:
+                            selected_urls.append(post_url)
+                            selected_comments_count += comments
+
+                    if selected_urls:
+                        st.markdown(f"**Selected:** {len(selected_urls)} posts with {selected_comments_count} comments")
+
+                        comments_limit = st.number_input(
+                            "Max comments to scrape",
+                            min_value=1,
+                            max_value=max(selected_comments_count, 1),
+                            value=min(100, selected_comments_count),
+                            step=10,
+                            key=f"comments_limit_{run_id}",
+                        )
+
+                        estimated_cost = (comments_limit / 1000) * 4
+                        st.write(f"**Estimated Cost:** ${estimated_cost:.4f}")
+
+                        if st.button("Scrape Comments", key=f"scrape_comments_{run_id}_{i}", type="primary"):
+                            with st.spinner("Scraping comments..."):
+                                comments_data, cost = fetch_comments_fn(selected_urls, comments_limit)
+                                if comments_data:
+                                    from src.ui_components import render_comments_stats
+                                    render_comments_stats(comments_data, cost)
+                                else:
+                                    st.warning("No comments were returned.")
+                    else:
+                        st.info("Select at least one post with comments to scrape.")

@@ -154,6 +154,18 @@ def fetch_actor_runs(actor_id, limit=50):
         return []
 
 
+def fetch_dataset_items(dataset_id):
+    """Fetch all items from an Apify dataset and return as a list."""
+    client = get_apify_client()
+    if not client:
+        return []
+    try:
+        return client.dataset(dataset_id).list_items().items or []
+    except Exception as e:
+        st.error(f"Error fetching dataset: {str(e)}")
+        return []
+
+
 def fetch_dataset_as_dataframe(dataset_id):
     """Fetch all items from an Apify dataset and return as a DataFrame."""
     client = get_apify_client()

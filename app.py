@@ -1,7 +1,7 @@
 import streamlit as st
 from src.auth import initialize_firebase, sign_in_with_email_and_password
 from src.ui_components import render_login, render_platform_selection, render_post_stats, render_comments_stats, render_history
-from src.apify_client import fetch_instagram_posts, fetch_instagram_comments, fetch_actor_runs, fetch_dataset_as_dataframe, ACTOR_POST_SCRAPER, ACTOR_COMMENT_SCRAPER
+from src.apify_client import fetch_instagram_posts, fetch_instagram_comments, fetch_actor_runs, fetch_dataset_as_dataframe, fetch_dataset_items, ACTOR_POST_SCRAPER, ACTOR_COMMENT_SCRAPER
 import math
 
 import extra_streamlit_components as stx
@@ -141,6 +141,8 @@ def main():
                     st.session_state.get("post_runs", []),
                     st.session_state.get("comment_runs", []),
                     fetch_dataset_as_dataframe,
+                    fetch_dataset_items,
+                    fetch_instagram_comments,
                 )
 
 
