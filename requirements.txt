@@ -1,6 +1,6 @@
 streamlit
 firebase-admin
-apify-client
+apify-client<3.0.0
 pandas
 python-dotenv
 requests
