@@ -1,3 +1,4 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from apify_client import ApifyClient
@@ -30,6 +31,7 @@ def _get_run_cost(client, run_id):
         return 0.0
 
 def fetch_instagram_posts(username_url, scan_params=None):
+    """Scrape posts of a profile, or of specific post URLs when given a list of them."""
     client = get_apify_client()
     if not client:
         return [], 0, None
@@ -38,12 +40,13 @@ def fetch_instagram_posts(username_url, scan_params=None):
         scan_params = {}
 
     run_input = {
-        "onlyPostsNewerThan": scan_params.get("onlyPostsNewerThan", "31 days"),
-        "resultsLimit": scan_params.get("resultsLimit", 100),
-        "skipPinnedPosts": scan_params.get("skipPinnedPosts", False),
+        "username": username_url if isinstance(username_url, list) else [username_url],
         "dataDetailLevel": scan_params.get("dataDetailLevel", "basicData"),
-        "username": [username_url],
     }
+    # Only send filters that were asked for: a date filter would drop older posts given by URL.
+    for name in ("onlyPostsNewerThan", "resultsLimit", "skipPinnedPosts"):
+        if name in scan_params:
+            run_input[name] = scan_params[name]
 
     try:
         run = client.actor(ACTOR_POST_SCRAPER).call(run_input=run_input)
@@ -87,6 +90,33 @@ def fetch_instagram_comments(post_urls, per_post_limit, include_replies=True, ma
         return [], 0
 
 
+_POST_URL = re.compile(
+    r"^(?:https?://)?(?:www\.|m\.)?instagram\.com/(?:[A-Za-z0-9_.]+/)?(p|reels?|tv)/([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
+
+
+def parse_instagram_post_urls(text):
+    """Split pasted text into normalised post/reel URLs and the lines that aren't one.
+
+    Returns (urls, invalid_lines); duplicates are dropped, order kept.
+    """
+    urls, invalid = [], []
+    for line in re.split(r"[\s,]+", text or ""):
+        line = line.strip()
+        if not line:
+            continue
+        match = _POST_URL.match(line)
+        if not match:
+            invalid.append(line)
+            continue
+        kind = "reel" if match.group(1).lower().startswith("reel") else match.group(1).lower()
+        url = f"https://www.instagram.com/{kind}/{match.group(2)}/"
+        if url not in urls:
+            urls.append(url)
+    return urls, invalid
+
+
 def _clean_instagram_handle(url_or_handle):
     """Extract clean Instagram handle from a URL or handle string."""
     handle = url_or_handle.strip().rstrip("/")
@@ -118,6 +148,8 @@ def _extract_run_details(token, run):
 
         # Post scraper uses "username" list, comment scraper uses "directUrls"
         usernames = run_input.get("username", [])
+        if usernames and all(_POST_URL.match(u.strip()) for u in usernames):
+            return f"{len(usernames)} post URLs", run_input
         if usernames:
             clean_names = [_clean_instagram_handle(u) for u in usernames]
             return ", ".join(clean_names), run_input

@@ -4,6 +4,7 @@ import json
 import io
 from datetime import date, timedelta
 
+from src.media import get_thumbnails, post_image_url
 from src.costs import (
     ACTOR_COMMENT_SCRAPER,
     ACTOR_POST_SCRAPER,
@@ -90,7 +91,7 @@ def render_platform_selection():
         "**Basic** data is faster and cheaper. "
         "**Detailed** data adds fields like alt text, latest comments, music info, "
         "paid partnership, and video play count. "
-        f"Please note that this will increase the cost per post by **${cost_addon:.4f}/post**."
+        f"Please note that this will increase the cost per post by **\\${cost_addon:.4f}/post**."
     )
 
     cost_per_post = cost_basic + (cost_addon if detail_level == "detailed" else 0)
@@ -103,9 +104,9 @@ def render_platform_selection():
     with col_cost2:
         st.metric("Estimated total cost", f"${estimated_cost:.4f}")
     if detail_level == "detailed":
-        st.caption(f"Base: ${cost_basic:.4f}/post + Add-on: ${cost_addon:.4f}/post = ${cost_per_post:.4f}/post × {results_limit} posts")
+        st.caption(f"Base: \\${cost_basic:.4f}/post + Add-on: \\${cost_addon:.4f}/post = \\${cost_per_post:.4f}/post × {results_limit} posts")
     else:
-        st.caption(f"Base: ${cost_basic:.4f}/post × {results_limit} posts")
+        st.caption(f"Base: \\${cost_basic:.4f}/post × {results_limit} posts")
     render_pricing_notes(ACTOR_POST_SCRAPER, ["post", "post-details"])
 
     scan_params = {
@@ -184,9 +185,9 @@ def render_comment_scrape_form(posts, key):
     budget = max(target * price, min_charge_usd(ACTOR_COMMENT_SCRAPER) or 0)
 
     st.write(f"**Plan:** up to {per_post_limit} comments from each of {len(urls)} posts (≈ {expected} comments)")
-    st.write(f"**Estimated cost:** ${expected * price:.4f} · **Hard cap:** ${budget:.4f}")
+    st.write(f"**Estimated cost:** \\${expected * price:.4f} · **Hard cap:** \\${budget:.4f}")
     st.caption(
-        f"Apify stops the run once it has charged ${budget:.4f} ({target} results"
+        f"Apify stops the run once it has charged \\${budget:.4f} ({target} results"
         + (", replies included)." if include_replies else ").")
     )
     render_pricing_notes(ACTOR_COMMENT_SCRAPER, ["comment"])
@@ -199,10 +200,165 @@ def render_comment_scrape_form(posts, key):
     }
 
 
+POSTS_PER_PAGE = 12
+_MD_SPECIAL = "\\`*_{}[]()#+-.!|<>~$"
+
+
+def _md_escape(text):
+    return "".join("\\" + ch if ch in _MD_SPECIAL else ch for ch in text)
+
+
+def post_title(post):
+    """Instagram posts have no title: use the caption's first line."""
+    caption = (post.get("caption") or "").strip()
+    first_line = caption.splitlines()[0].strip() if caption else ""
+    if not first_line:
+        return "(no caption)"
+    return first_line if len(first_line) <= 80 else first_line[:79] + "…"
+
+
+def _post_date(post):
+    try:
+        return pd.to_datetime(post.get("timestamp")).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _can_scrape_comments(post):
+    return int(post.get("commentsCount") or 0) > 0 and not post.get("isCommentsDisabled")
+
+
+def render_post_picker(posts, key, page_fallback=None):
+    """Grid of posts (image, title, page, stats) with a checkbox each; returns the selected posts.
+
+    Selection is kept in session state, so it survives paging and reruns.
+    """
+    posts = [p for p in posts if p.get("url") and not p.get("error")]
+    if not posts:
+        st.info("This scan has no posts.")
+        return []
+
+    st.markdown("""
+    <style>
+        .post-noimg {
+            aspect-ratio: 4 / 5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 6px;
+            background: rgba(128, 128, 128, 0.15);
+            color: rgba(128, 128, 128, 0.95);
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+    ids =[f"{i}-{p.get('shortCode') or ''}" for i, p in enumerate(posts)]
+    selectable = {pid for pid, p in zip(ids, posts) if _can_scrape_comments(p)}
+    sel_key = f"_picked_{key}"
+    if sel_key not in st.session_state:
+        st.session_state[sel_key] = set(selectable)
+    selected = st.session_state[sel_key]
+    widget_prefix = f"pick_{key}_"
+
+    def _reset_checkboxes():
+        # Let the checkboxes re-read their value from the selection set.
+        for k in [k for k in st.session_state if str(k).startswith(widget_prefix)]:
+            del st.session_state[k]
+
+    def _select(all_posts):
+        st.session_state[sel_key] = set(selectable) if all_posts else set()
+        _reset_checkboxes()
+
+    def _toggle(pid):
+        if st.session_state[widget_prefix + pid]:
+            st.session_state[sel_key].add(pid)
+        else:
+            st.session_state[sel_key].discard(pid)
+
+    pages = max(1, -(-len(posts) // POSTS_PER_PAGE))
+    col_all, col_none, col_page, col_info = st.columns([1, 1, 1, 2], vertical_alignment="bottom")
+    col_all.button("Select all", key=f"pick_all_{key}", on_click=_select, args=(True,), use_container_width=True)
+    col_none.button("Select none", key=f"pick_none_{key}", on_click=_select, args=(False,), use_container_width=True)
+    page = col_page.number_input(f"Page (of {pages})", min_value=1, max_value=pages, value=1, key=f"pick_page_{key}") if pages > 1 else 1
+    n_selected = len(selected & selectable)
+    selected_comments = sum(int(p.get("commentsCount") or 0) for pid, p in zip(ids, posts) if pid in selected)
+    col_info.markdown(f"**{n_selected}** of {len(posts)} posts selected · {selected_comments} comments")
+
+    start = (page - 1) * POSTS_PER_PAGE
+    chunk = list(zip(ids, posts))[start:start + POSTS_PER_PAGE]
+    thumbnails = get_thumbnails([post_image_url(p) for _, p in chunk])
+
+    per_row = 4
+    for row in range(0, len(chunk), per_row):
+        columns = st.columns(per_row)
+        for column, (pid, post) in zip(columns, chunk[row:row + per_row]):
+            with column.container(border=True):
+                image = thumbnails.get(post_image_url(post))
+                if image:
+                    st.image(image, width="stretch")
+                else:
+                    st.markdown('<div class="post-noimg">Image not available</div>', unsafe_allow_html=True)
+
+                st.markdown(f"**{_md_escape(post_title(post))}**")
+                username = post.get("ownerUsername") or page_fallback
+                if username:
+                    full_name = post.get("ownerFullName")
+                    st.caption(
+                        f"[@{_md_escape(username)}](https://www.instagram.com/{username}/)"
+                        + (f" · {_md_escape(full_name)}" if full_name else "")
+                    )
+                comments = int(post.get("commentsCount") or 0)
+                st.caption(
+                    f"{_post_date(post)} · ❤️ {int(post.get('likesCount') or 0)} · 💬 {comments} · "
+                    f"[Open post ↗]({post['url']})"
+                )
+                can_scrape = pid in selectable
+                st.checkbox(
+                    "Select" if can_scrape else ("Comments disabled" if post.get("isCommentsDisabled") else "No comments"),
+                    value=pid in selected and can_scrape,
+                    key=widget_prefix + pid,
+                    on_change=_toggle,
+                    args=(pid,),
+                    disabled=not can_scrape,
+                )
+
+    return [p for pid, p in zip(ids, posts) if pid in selected and pid in selectable]
+
+
+def render_url_comment_form(urls, key):
+    """Inputs for scraping comments from pasted post URLs (no comment counts known)."""
+    per_post = st.number_input("Comments per post", min_value=1, max_value=50_000, value=100, step=10, key=f"per_post_{key}")
+    include_replies = st.checkbox(
+        "Include replies",
+        value=True,
+        key=f"include_replies_{key}",
+        help="Each reply is charged like a comment and counts toward the same budget.",
+    )
+    price = comment_price()
+    max_results = per_post * len(urls)
+    budget = max(max_results * price, min_charge_usd(ACTOR_COMMENT_SCRAPER) or 0)
+
+    st.write(f"**Plan:** up to {per_post} comments from each of {len(urls)} posts (max {max_results} results)")
+    st.write(f"**Max cost:** \\${budget:.4f}")
+    st.caption(
+        "Posts with fewer comments cost less. Apify stops the run once it has charged "
+        f"\\${budget:.4f}" + (", replies included." if include_replies else ".")
+    )
+    render_pricing_notes(ACTOR_COMMENT_SCRAPER, ["comment"])
+    return {
+        "urls": urls,
+        "per_post_limit": per_post,
+        "include_replies": include_replies,
+        "max_charge_usd": budget,
+    }
+
+
 def render_comments_stats(comments, cost, key="comments"):
     st.subheader("Analysis Results")
     st.write(f"Total Comments Scanned: {len(comments)}")
-    st.write(f"Run Cost: ${cost:.4f}")
+    st.write(f"Run Cost: \\${cost:.4f}")
 
     if comments:
         # Convert to JSON string
@@ -367,63 +523,26 @@ def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetc
                                 else:
                                     st.warning("Dataset is empty.")
 
-            # --- Comment scraping from post runs ---
+            # --- Posts of this run (preview + comment scraping) ---
             if run_type == "posts" and status == "SUCCEEDED" and fetch_items_fn and fetch_comments_fn:
                 run_id = run["run_id"]
                 st.divider()
 
-                # Load posts button
                 if run_id not in st.session_state[posts_cache_key]:
-                    if st.button("Load Posts for Comment Scraping", key=f"load_posts_{run_id}_{i}"):
+                    if st.button("Show posts", key=f"load_posts_{run_id}_{i}"):
                         with st.spinner("Loading posts from this run..."):
                             items = fetch_items_fn(run["dataset_id"])
-                            if items:
-                                st.session_state[posts_cache_key][run_id] = items
-                                st.rerun()
-                            else:
-                                st.warning("No posts found in this dataset.")
+                        if items:
+                            st.session_state[posts_cache_key][run_id] = items
+                            st.rerun()
+                        else:
+                            st.warning("No posts found in this dataset.")
                 else:
                     posts = st.session_state[posts_cache_key][run_id]
-                    total_comments = sum(p.get("commentsCount", 0) for p in posts)
-
-                    st.markdown(f"**{len(posts)} posts** — {total_comments} total comments available")
-
-                    # Select all / deselect all
-                    select_all_key = f"select_all_{run_id}"
-
-                    def _toggle_all(rid=run_id, n=len(posts)):
-                        val = st.session_state[f"select_all_{rid}"]
-                        for idx in range(n):
-                            st.session_state[f"post_cb_{rid}_{idx}"] = val
-
-                    select_all = st.checkbox("Select all", value=True, key=select_all_key, on_change=_toggle_all)
-
-                    # Render each post with checkbox
-                    selected_posts = []
-                    selected_comments_count = 0
-                    for j, post in enumerate(posts):
-                        post_url = post.get("url", "")
-                        shortcode = post.get("shortCode", post_url.split("/")[-2] if "/p/" in post_url else "")
-                        likes = post.get("likesCount", 0)
-                        comments = post.get("commentsCount", 0)
-                        caption = post.get("caption", "") or ""
-                        caption_preview = (caption[:60] + "...") if len(caption) > 60 else caption
-
-                        cb_key = f"post_cb_{run_id}_{j}"
-                        if cb_key not in st.session_state:
-                            st.session_state[cb_key] = True
-
-                        checked = st.checkbox(
-                            f"📷 `{shortcode}` — ❤️ {likes} — 💬 {comments} — {caption_preview}",
-                            key=cb_key,
-                        )
-                        if checked and post_url and comments > 0:
-                            selected_posts.append(post)
-                            selected_comments_count += comments
+                    selected_posts = render_post_picker(posts, key=f"hist_{run_id}", page_fallback=run["username"])
 
                     if selected_posts:
-                        st.markdown(f"**Selected:** {len(selected_posts)} posts with {selected_comments_count} comments")
-
+                        st.markdown("**Scrape comments from the selected posts**")
                         plan = render_comment_scrape_form(selected_posts, key=run_id)
                         results = st.session_state.setdefault("_history_comment_results", {})
 
