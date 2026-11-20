@@ -4,7 +4,24 @@ import json
 import io
 from datetime import date, timedelta
 
-from src.costs import comment_price, plan_comment_scrape, post_price
+from src.costs import (
+    ACTOR_COMMENT_SCRAPER,
+    ACTOR_POST_SCRAPER,
+    comment_price,
+    min_charge_usd,
+    plan_comment_scrape,
+    pricing_notes,
+    post_price,
+)
+
+
+def render_pricing_notes(actor_id, events):
+    """Say where the cost estimate's prices come from, warning when they're fallbacks."""
+    for level, text in pricing_notes(actor_id, events):
+        if level == "warning":
+            st.warning(text, icon="⚠️")
+        else:
+            st.caption(text)
 
 def render_login():
     st.title("Login")
@@ -89,6 +106,7 @@ def render_platform_selection():
         st.caption(f"Base: ${cost_basic:.4f}/post + Add-on: ${cost_addon:.4f}/post = ${cost_per_post:.4f}/post × {results_limit} posts")
     else:
         st.caption(f"Base: ${cost_basic:.4f}/post × {results_limit} posts")
+    render_pricing_notes(ACTOR_POST_SCRAPER, ["post", "post-details"])
 
     scan_params = {
         "onlyPostsNewerThan": posts_newer_than,
@@ -162,7 +180,8 @@ def render_comment_scrape_form(posts, key):
 
     urls, per_post_limit, expected = plan_comment_scrape(posts, target)
     price = comment_price()
-    budget = target * price
+    # Apify rejects caps below the actor's minimum, which a cheap tier can hit for tiny targets.
+    budget = max(target * price, min_charge_usd(ACTOR_COMMENT_SCRAPER) or 0)
 
     st.write(f"**Plan:** up to {per_post_limit} comments from each of {len(urls)} posts (≈ {expected} comments)")
     st.write(f"**Estimated cost:** ${expected * price:.4f} · **Hard cap:** ${budget:.4f}")
@@ -170,6 +189,7 @@ def render_comment_scrape_form(posts, key):
         f"Apify stops the run once it has charged ${budget:.4f} ({target} results"
         + (", replies included)." if include_replies else ").")
     )
+    render_pricing_notes(ACTOR_COMMENT_SCRAPER, ["comment"])
 
     return {
         "urls": urls,

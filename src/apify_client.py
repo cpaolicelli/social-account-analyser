@@ -4,18 +4,11 @@ from apify_client import ApifyClient
 import streamlit as st
 import pandas as pd
 
-from src.costs import ACTOR_COMMENT_SCRAPER, ACTOR_POST_SCRAPER, to_charge_limit
-
-
-def _get_token():
-    token = st.secrets.get("apify", {}).get("api_token")
-    if not token or token == "YOUR_APIFY_API_TOKEN":
-        return None
-    return token
+from src.costs import ACTOR_COMMENT_SCRAPER, ACTOR_POST_SCRAPER, get_api_token, to_charge_limit
 
 
 def get_apify_client():
-    token = _get_token()
+    token = get_api_token()
     if not token:
         st.error("Apify API token not configured.")
         return None
@@ -149,7 +142,7 @@ def fetch_actor_runs(actor_id, limit=50):
         runs = runs_list.items if runs_list else []
 
         # Each run's input lives in its own key-value store: fetch them in parallel.
-        token = _get_token()
+        token = get_api_token()
         with ThreadPoolExecutor(max_workers=8) as pool:
             details = list(pool.map(lambda r: _extract_run_details(token, r), runs))
 
