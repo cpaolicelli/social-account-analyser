@@ -4,6 +4,8 @@ import json
 import io
 from datetime import date, timedelta
 
+from src.costs import comment_price, plan_comment_scrape, post_price
+
 def render_login():
     st.title("Login")
     with st.form("login_form"):
@@ -64,17 +66,17 @@ def render_platform_selection():
         ["basic", "detailed"],
         horizontal=True,
     )
+    # --- Estimated cost (live Apify prices) ---
+    cost_basic = post_price(detailed=False)
+    cost_addon = post_price(detailed=True) - cost_basic
     st.caption(
         "**Basic** data is faster and cheaper. "
         "**Detailed** data adds fields like alt text, latest comments, music info, "
         "paid partnership, and video play count. "
-        "Please note that this will increase the cost per post by **$0.0007/post**."
+        f"Please note that this will increase the cost per post by **${cost_addon:.4f}/post**."
     )
 
-    # --- Estimated cost ---
-    COST_BASIC = 0.0013
-    COST_ADDON = 0.0007
-    cost_per_post = COST_BASIC + (COST_ADDON if detail_level == "detailed" else 0)
+    cost_per_post = cost_basic + (cost_addon if detail_level == "detailed" else 0)
     estimated_cost = cost_per_post * results_limit
 
     st.markdown("---")
@@ -84,15 +86,15 @@ def render_platform_selection():
     with col_cost2:
         st.metric("Estimated total cost", f"${estimated_cost:.4f}")
     if detail_level == "detailed":
-        st.caption(f"Base: ${COST_BASIC}/post + Add-on: ${COST_ADDON}/post = ${cost_per_post}/post × {results_limit} posts")
+        st.caption(f"Base: ${cost_basic:.4f}/post + Add-on: ${cost_addon:.4f}/post = ${cost_per_post:.4f}/post × {results_limit} posts")
     else:
-        st.caption(f"Base: ${COST_BASIC}/post × {results_limit} posts")
+        st.caption(f"Base: ${cost_basic:.4f}/post × {results_limit} posts")
 
     scan_params = {
         "onlyPostsNewerThan": posts_newer_than,
         "resultsLimit": results_limit,
         "skipPinnedPosts": skip_pinned,
-        "expandOwner": detail_level == "detailed",
+        "dataDetailLevel": "detailedData" if detail_level == "detailed" else "basicData",
     }
 
     return platform, handle, scan_params
@@ -126,20 +128,73 @@ def render_post_stats(posts, cost):
     st.subheader("Raw Data Preview")
     st.dataframe(df)
 
-def render_comments_stats(comments, cost):
+def render_comment_scrape_form(posts, key):
+    """Inputs for a comment scrape over `posts`.
+
+    Returns the plan for fetch_instagram_comments, or None if no post has comments.
+    """
+    total_available = sum(int(p.get("commentsCount") or 0) for p in posts)
+    if total_available == 0:
+        return None
+
+    target_key = f"comments_target_{key}"
+    if target_key in st.session_state:
+        # Keep a previous value inside the range when the post selection shrinks.
+        st.session_state[target_key] = max(1, min(int(st.session_state[target_key]), total_available))
+        default = {}
+    else:
+        default = {"value": min(100, total_available)}
+
+    target = st.number_input(
+        "Number of comments to scrape",
+        min_value=1,
+        max_value=total_available,
+        step=10,
+        key=target_key,
+        **default,
+    )
+    include_replies = st.checkbox(
+        "Include replies",
+        value=True,
+        key=f"include_replies_{key}",
+        help="Each reply is charged like a comment and counts toward the same budget.",
+    )
+
+    urls, per_post_limit, expected = plan_comment_scrape(posts, target)
+    price = comment_price()
+    budget = target * price
+
+    st.write(f"**Plan:** up to {per_post_limit} comments from each of {len(urls)} posts (≈ {expected} comments)")
+    st.write(f"**Estimated cost:** ${expected * price:.4f} · **Hard cap:** ${budget:.4f}")
+    st.caption(
+        f"Apify stops the run once it has charged ${budget:.4f} ({target} results"
+        + (", replies included)." if include_replies else ").")
+    )
+
+    return {
+        "urls": urls,
+        "per_post_limit": per_post_limit,
+        "include_replies": include_replies,
+        "max_charge_usd": budget,
+    }
+
+
+def render_comments_stats(comments, cost, key="comments"):
     st.subheader("Analysis Results")
     st.write(f"Total Comments Scanned: {len(comments)}")
     st.write(f"Run Cost: ${cost:.4f}")
-    
+
     if comments:
         # Convert to JSON string
         comments_json = json.dumps(comments, indent=2)
-        
+
         st.download_button(
             label="Download Comments JSON",
             data=comments_json,
             file_name="comments_data.json",
-            mime="application/json"
+            mime="application/json",
+            key=f"download_{key}",
+            on_click="ignore",
         )
         
         with st.expander("View Comments Data"):
@@ -258,6 +313,8 @@ def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetc
                         st.write(f"- Period: {run_input['onlyPostsNewerThan']}")
                     if "resultsLimit" in run_input:
                         st.write(f"- Results limit: {run_input['resultsLimit']}")
+                    if "dataDetailLevel" in run_input:
+                        st.write(f"- Detail level: {run_input['dataDetailLevel']}")
                     if "skipPinnedPosts" in run_input:
                         st.write(f"- Skip pinned: {run_input['skipPinnedPosts']}")
                     if "directUrls" in run_input:
@@ -322,7 +379,7 @@ def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetc
                     select_all = st.checkbox("Select all", value=True, key=select_all_key, on_change=_toggle_all)
 
                     # Render each post with checkbox
-                    selected_urls = []
+                    selected_posts = []
                     selected_comments_count = 0
                     for j, post in enumerate(posts):
                         post_url = post.get("url", "")
@@ -341,31 +398,29 @@ def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetc
                             key=cb_key,
                         )
                         if checked and post_url and comments > 0:
-                            selected_urls.append(post_url)
+                            selected_posts.append(post)
                             selected_comments_count += comments
 
-                    if selected_urls:
-                        st.markdown(f"**Selected:** {len(selected_urls)} posts with {selected_comments_count} comments")
+                    if selected_posts:
+                        st.markdown(f"**Selected:** {len(selected_posts)} posts with {selected_comments_count} comments")
 
-                        comments_limit = st.number_input(
-                            "Max comments to scrape",
-                            min_value=1,
-                            max_value=max(selected_comments_count, 1),
-                            value=min(100, selected_comments_count),
-                            step=10,
-                            key=f"comments_limit_{run_id}",
-                        )
-
-                        estimated_cost = (comments_limit / 1000) * 4
-                        st.write(f"**Estimated Cost:** ${estimated_cost:.4f}")
+                        plan = render_comment_scrape_form(selected_posts, key=run_id)
+                        results = st.session_state.setdefault("_history_comment_results", {})
 
                         if st.button("Scrape Comments", key=f"scrape_comments_{run_id}_{i}", type="primary"):
                             with st.spinner("Scraping comments..."):
-                                comments_data, cost = fetch_comments_fn(selected_urls, comments_limit)
-                                if comments_data:
-                                    from src.ui_components import render_comments_stats
-                                    render_comments_stats(comments_data, cost)
-                                else:
-                                    st.warning("No comments were returned.")
+                                results[run_id] = fetch_comments_fn(
+                                    plan["urls"],
+                                    plan["per_post_limit"],
+                                    include_replies=plan["include_replies"],
+                                    max_charge_usd=plan["max_charge_usd"],
+                                )
+
+                        if run_id in results:
+                            comments_data, cost = results[run_id]
+                            if comments_data:
+                                render_comments_stats(comments_data, cost, key=f"history_{run_id}")
+                            else:
+                                st.warning("No comments were returned.")
                     else:
                         st.info("Select at least one post with comments to scrape.")

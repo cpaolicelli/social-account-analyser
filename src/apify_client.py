@@ -1,14 +1,22 @@
+from concurrent.futures import ThreadPoolExecutor
+
 from apify_client import ApifyClient
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 
-ACTOR_POST_SCRAPER = "apify/instagram-post-scraper"
-ACTOR_COMMENT_SCRAPER = "apify/instagram-comment-scraper"
+from src.costs import ACTOR_COMMENT_SCRAPER, ACTOR_POST_SCRAPER, to_charge_limit
 
-def get_apify_client():
+
+def _get_token():
     token = st.secrets.get("apify", {}).get("api_token")
     if not token or token == "YOUR_APIFY_API_TOKEN":
+        return None
+    return token
+
+
+def get_apify_client():
+    token = _get_token()
+    if not token:
         st.error("Apify API token not configured.")
         return None
     return ApifyClient(token)
@@ -40,6 +48,7 @@ def fetch_instagram_posts(username_url, scan_params=None):
         "onlyPostsNewerThan": scan_params.get("onlyPostsNewerThan", "31 days"),
         "resultsLimit": scan_params.get("resultsLimit", 100),
         "skipPinnedPosts": scan_params.get("skipPinnedPosts", False),
+        "dataDetailLevel": scan_params.get("dataDetailLevel", "basicData"),
         "username": [username_url],
     }
 
@@ -54,22 +63,29 @@ def fetch_instagram_posts(username_url, scan_params=None):
         st.error(f"Error fetching posts: {str(e)}")
         return [], 0, None
 
-def fetch_instagram_comments(post_urls, limit):
+def fetch_instagram_comments(post_urls, per_post_limit, include_replies=True, max_charge_usd=None):
+    """Scrape comments from post URLs.
+
+    per_post_limit is applied to each URL by the actor (see costs.plan_comment_scrape).
+    max_charge_usd is a hard spending cap enforced by Apify; replies count toward it.
+    """
     client = get_apify_client()
     if not client:
-        return []
+        return [], 0
 
     run_input = {
         "directUrls": post_urls,
-        "includeNestedComments": True,
-        "isNewestComments": False,
-        "resultsLimit": limit
+        "includeNestedComments": include_replies,
+        "resultsLimit": per_post_limit,
     }
 
     try:
-        run = client.actor("apify/instagram-comment-scraper").call(run_input=run_input)
+        run = client.actor(ACTOR_COMMENT_SCRAPER).call(
+            run_input=run_input,
+            max_total_charge_usd=to_charge_limit(max_charge_usd) if max_charge_usd else None,
+        )
         dataset_items = client.dataset(run["defaultDatasetId"]).list_items().items
-         
+
         cost = _get_run_cost(client, run["id"])
 
         return dataset_items, cost
@@ -90,11 +106,17 @@ def _clean_instagram_handle(url_or_handle):
     return handle or url_or_handle
 
 
-def _extract_run_details(client, run):
-    """Extract Instagram username and input config from a run."""
+def _extract_run_details(token, run):
+    """Extract Instagram username and input config from a run.
+
+    Runs in a worker thread, so it builds its own client and must not call st.*.
+    """
     try:
-        run_detail = client.run(run["id"]).get()
-        kvs_id = run_detail.get("defaultKeyValueStoreId")
+        client = ApifyClient(token)
+        # The runs list already carries the store ID; only fall back to a full fetch if not.
+        kvs_id = run.get("defaultKeyValueStoreId")
+        if not kvs_id:
+            kvs_id = (client.run(run["id"]).get() or {}).get("defaultKeyValueStoreId")
         run_input = {}
         if kvs_id:
             record = client.key_value_store(kvs_id).get_record("INPUT")
@@ -126,25 +148,21 @@ def fetch_actor_runs(actor_id, limit=50):
         runs_list = client.actor(actor_id).runs().list(limit=limit, desc=True)
         runs = runs_list.items if runs_list else []
 
+        # Each run's input lives in its own key-value store: fetch them in parallel.
+        token = _get_token()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            details = list(pool.map(lambda r: _extract_run_details(token, r), runs))
+
         history = []
-        for run in runs:
-            status = run.get("status", "UNKNOWN")
-            started = run.get("startedAt", "")
-            finished = run.get("finishedAt", "")
-            cost = run.get("usageTotalUsd", 0) or 0
-            dataset_id = run.get("defaultDatasetId", "")
-            run_id = run.get("id", "")
-
-            username, run_input = _extract_run_details(client, run)
-
+        for run, (username, run_input) in zip(runs, details):
             history.append({
-                "run_id": run_id,
+                "run_id": run.get("id", ""),
                 "username": username,
-                "status": status,
-                "started_at": started,
-                "finished_at": finished,
-                "cost_usd": float(cost),
-                "dataset_id": dataset_id,
+                "status": run.get("status", "UNKNOWN"),
+                "started_at": run.get("startedAt", ""),
+                "finished_at": run.get("finishedAt", ""),
+                "cost_usd": float(run.get("usageTotalUsd", 0) or 0),
+                "dataset_id": run.get("defaultDatasetId", ""),
                 "run_input": run_input,
             })
 

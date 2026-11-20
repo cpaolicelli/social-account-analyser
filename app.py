@@ -1,8 +1,7 @@
 import streamlit as st
 from src.auth import initialize_firebase, sign_in_with_email_and_password
-from src.ui_components import render_login, render_platform_selection, render_post_stats, render_comments_stats, render_history
+from src.ui_components import render_login, render_platform_selection, render_post_stats, render_comments_stats, render_comment_scrape_form, render_history
 from src.apify_client import fetch_instagram_posts, fetch_instagram_comments, fetch_actor_runs, fetch_dataset_as_dataframe, fetch_dataset_items, ACTOR_POST_SCRAPER, ACTOR_COMMENT_SCRAPER
-import math
 
 import extra_streamlit_components as stx
 from datetime import datetime, timedelta
@@ -63,6 +62,8 @@ def main():
             if st.button("Logout", use_container_width=True):
                 st.session_state.user = None
                 st.session_state.posts_data = None
+                st.session_state.pop("comments_result", None)
+                st.session_state.history_loaded = False
                 cookie_manager.delete("user_session")
                 st.rerun()
 
@@ -78,7 +79,11 @@ def main():
                         posts, cost, run_id = fetch_instagram_posts(handle, scan_params)
                         st.session_state.posts_data = posts
                         st.session_state.scan_cost = cost
-                        st.success("Scan completed successfully!")
+                        # New profile: old comment results no longer apply; history has a new run.
+                        st.session_state.pop("comments_result", None)
+                        st.session_state.history_loaded = False
+                        if run_id:
+                            st.success("Scan completed successfully!")
 
             # Display Results
             if st.session_state.posts_data:
@@ -91,39 +96,30 @@ def main():
             if st.session_state.posts_data:
                 st.markdown("### Configure Comment Analysis")
 
-                total_comments_available = sum(p.get('commentsCount', 0) for p in st.session_state.posts_data)
+                posts = st.session_state.posts_data
+                total_comments_available = sum(int(p.get('commentsCount') or 0) for p in posts)
 
                 if total_comments_available == 0:
                     st.warning("No comments found in the scanned posts. Scan a profile first in **Post Scraping**.")
                 else:
-                    st.info(f"**{total_comments_available}** comments available across **{len(st.session_state.posts_data)}** posts.")
+                    st.info(f"**{total_comments_available}** comments available across **{len(posts)}** posts.")
 
-                    comments_to_scan = st.number_input(
-                        "Number of comments to analyze",
-                        min_value=1,
-                        max_value=total_comments_available,
-                        value=min(100, total_comments_available),
-                        step=10,
-                    )
-
-                    estimated_cost = (comments_to_scan / 1000) * 4
-                    st.write(f"**Estimated Cost:** ${estimated_cost:.4f}")
+                    plan = render_comment_scrape_form(posts, key="current_scan")
 
                     if st.button("Start Analysis"):
                         with st.spinner("Fetching comments..."):
-                            target_posts_urls = []
-                            accumulated_comments = 0
+                            st.session_state.comments_result = fetch_instagram_comments(
+                                plan["urls"],
+                                plan["per_post_limit"],
+                                include_replies=plan["include_replies"],
+                                max_charge_usd=plan["max_charge_usd"],
+                            )
+                        st.session_state.history_loaded = False
 
-                            for post in st.session_state.posts_data:
-                                if accumulated_comments >= comments_to_scan:
-                                    break
-                                post_comments = post.get('commentsCount', 0)
-                                if post_comments > 0:
-                                    target_posts_urls.append(post['url'])
-                                    accumulated_comments += post_comments
-
-                            comments, cost = fetch_instagram_comments(target_posts_urls, comments_to_scan)
-                            render_comments_stats(comments, cost)
+                    # Kept in session state so results survive reruns (downloads, other widgets).
+                    if st.session_state.get("comments_result"):
+                        comments, cost = st.session_state.comments_result
+                        render_comments_stats(comments, cost, key="current_scan")
             else:
                 st.warning("No posts data available. Go to **Post Scraping** to scan a profile first.")
 
@@ -131,19 +127,28 @@ def main():
         elif page == "Scraping History":
             st.header("Scraping History")
 
-            if not st.session_state.get("post_runs") and not st.session_state.get("comment_runs"):
+            col_info, col_refresh = st.columns([4, 1])
+            with col_refresh:
+                refresh = st.button("🔄 Refresh", use_container_width=True)
+
+            if refresh or not st.session_state.get("history_loaded"):
                 with st.spinner("Loading run history from Apify..."):
                     st.session_state.post_runs = fetch_actor_runs(ACTOR_POST_SCRAPER)
                     st.session_state.comment_runs = fetch_actor_runs(ACTOR_COMMENT_SCRAPER)
+                st.session_state.history_loaded = True
+                st.session_state.history_loaded_at = datetime.now()
 
-            if st.session_state.get("post_runs") or st.session_state.get("comment_runs"):
-                render_history(
-                    st.session_state.get("post_runs", []),
-                    st.session_state.get("comment_runs", []),
-                    fetch_dataset_as_dataframe,
-                    fetch_dataset_items,
-                    fetch_instagram_comments,
-                )
+            with col_info:
+                if st.session_state.get("history_loaded_at"):
+                    st.caption(f"Last updated {st.session_state.history_loaded_at:%H:%M:%S}")
+
+            render_history(
+                st.session_state.get("post_runs", []),
+                st.session_state.get("comment_runs", []),
+                fetch_dataset_as_dataframe,
+                fetch_dataset_items,
+                fetch_instagram_comments,
+            )
 
 
 if __name__ == "__main__":
