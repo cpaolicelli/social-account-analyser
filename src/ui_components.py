@@ -1,3 +1,4 @@
+import html
 import streamlit as st
 import pandas as pd
 import json
@@ -156,21 +157,13 @@ def render_comment_scrape_form(posts, key):
     if total_available == 0:
         return None
 
-    target_key = f"comments_target_{key}"
-    if target_key in st.session_state:
-        # Keep a previous value inside the range when the post selection shrinks.
-        st.session_state[target_key] = max(1, min(int(st.session_state[target_key]), total_available))
-        default = {}
-    else:
-        default = {"value": min(100, total_available)}
-
+    # No upper limit: Instagram's counts can be out of date, and the actor has no maximum.
     target = st.number_input(
         "Number of comments to scrape",
         min_value=1,
-        max_value=total_available,
+        value=min(100, total_available),
         step=10,
-        key=target_key,
-        **default,
+        key=f"comments_target_{key}",
     )
     include_replies = st.checkbox(
         "Include replies",
@@ -186,6 +179,12 @@ def render_comment_scrape_form(posts, key):
 
     st.write(f"**Plan:** up to {per_post_limit} comments from each of {len(urls)} posts (≈ {expected} comments)")
     st.write(f"**Estimated cost:** \\${expected * price:.4f} · **Hard cap:** \\${budget:.4f}")
+    if target > total_available:
+        st.caption(
+            f"Instagram reports {total_available} comments on these posts, fewer than the {target} asked. "
+            f"Counts can be out of date, so each post is asked for up to {per_post_limit}: "
+            "you pay only for the comments returned, never more than the hard cap."
+        )
     st.caption(
         f"Apify stops the run once it has charged \\${budget:.4f} ({target} results"
         + (", replies included)." if include_replies else ").")
@@ -228,11 +227,67 @@ def _can_scrape_comments(post):
     return int(post.get("commentsCount") or 0) > 0 and not post.get("isCommentsDisabled")
 
 
-def render_post_picker(posts, key, page_fallback=None):
+AVATAR_CSS = """
+<style>
+    .avatar {
+        display: inline-flex; align-items: center; justify-content: center;
+        border-radius: 50%; object-fit: cover; flex: none;
+        background: rgba(128, 128, 128, 0.25); color: inherit; font-weight: 700;
+        vertical-align: middle;
+    }
+    .profile-line { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px; font-size: 14px; line-height: 1.25; }
+    .profile-line a { font-weight: 600; text-decoration: none; }
+    .profile-line .full-name { opacity: 0.7; font-size: 13px; }
+</style>
+"""
+
+
+def avatar_html(username, info=None, size=28):
+    """Round profile picture, or the profile's initial when no picture is saved."""
+    style = f"width:{size}px;height:{size}px;font-size:{max(10, size // 2.4):.0f}px"
+    if info and info.get("picB64"):
+        return f'<img class="avatar" style="{style}" src="data:image/jpeg;base64,{info["picB64"]}" alt="">'
+    initial = html.escape((username or "?")[:1].upper())
+    return f'<span class="avatar" style="{style}">{initial}</span>'
+
+
+def profile_line_html(username, info=None, size=28):
+    """Avatar + @username link + full name, as one HTML line."""
+    full_name = (info or {}).get("fullName") or ""
+    name = html.escape(username)
+    return (
+        f'<div class="profile-line">{avatar_html(username, info, size)}'
+        f'<span><a href="https://www.instagram.com/{name}/" target="_blank">@{name}</a>'
+        + (f'<br><span class="full-name">{html.escape(full_name)}</span>' if full_name else "")
+        + "</span></div>"
+    )
+
+
+def post_owners(posts):
+    """Distinct authors of the given posts, in order."""
+    return list(dict.fromkeys((p.get("ownerUsername") or "").lower() for p in posts if p.get("ownerUsername")))
+
+
+def run_profiles_label(run):
+    """Text naming the profile(s) a history run is about."""
+    profiles = run.get("profiles") or []
+    unknown = len(run.get("unknown_urls") or [])
+    if profiles:
+        label = ", ".join(f"@{p}" for p in profiles[:3]) + (f" +{len(profiles) - 3}" if len(profiles) > 3 else "")
+        return label + (f" (+{unknown} posts of unknown profile)" if unknown else "")
+    if unknown:
+        return f"Unknown profile · {unknown} posts"
+    return run.get("username") or "Unknown"
+
+
+def render_post_picker(posts, key, page_fallback=None, profiles=None):
     """Grid of posts (image, title, page, stats) with a checkbox each; returns the selected posts.
 
+    profiles: {username: saved profile info} for the avatars.
     Selection is kept in session state, so it survives paging and reruns.
     """
+    profiles = profiles or {}
+    st.markdown(AVATAR_CSS, unsafe_allow_html=True)
     posts = [p for p in posts if p.get("url") and not p.get("error")]
     if not posts:
         st.info("This scan has no posts.")
@@ -302,13 +357,11 @@ def render_post_picker(posts, key, page_fallback=None):
                     st.markdown('<div class="post-noimg">Image not available</div>', unsafe_allow_html=True)
 
                 st.markdown(f"**{_md_escape(post_title(post))}**")
-                username = post.get("ownerUsername") or page_fallback
+                username = (post.get("ownerUsername") or page_fallback or "").lower()
                 if username:
-                    full_name = post.get("ownerFullName")
-                    st.caption(
-                        f"[@{_md_escape(username)}](https://www.instagram.com/{username}/)"
-                        + (f" · {_md_escape(full_name)}" if full_name else "")
-                    )
+                    info = dict(profiles.get(username) or {})
+                    info["fullName"] = info.get("fullName") or post.get("ownerFullName") or ""
+                    st.markdown(profile_line_html(username, info, size=26), unsafe_allow_html=True)
                 comments = int(post.get("commentsCount") or 0)
                 st.caption(
                     f"{_post_date(post)} · ❤️ {int(post.get('likesCount') or 0)} · 💬 {comments} · "
@@ -329,7 +382,7 @@ def render_post_picker(posts, key, page_fallback=None):
 
 def render_url_comment_form(urls, key):
     """Inputs for scraping comments from pasted post URLs (no comment counts known)."""
-    per_post = st.number_input("Comments per post", min_value=1, max_value=50_000, value=100, step=10, key=f"per_post_{key}")
+    per_post = st.number_input("Comments per post", min_value=1, value=100, step=10, key=f"per_post_{key}")
     include_replies = st.checkbox(
         "Include replies",
         value=True,
@@ -380,8 +433,13 @@ def render_comments_stats(comments, cost, key="comments"):
     st.info("Toxicity integration pending...")
 
 
-def render_history(post_runs, comment_runs, fetch_dataset_fn, fetch_items_fn, fetch_comments_fn):
-    """Render the scraping history in the main content area."""
+def render_history(post_runs, comment_runs, fetch_dataset_fn, fetch_items_fn, fetch_comments_fn, profiles=None):
+    """Render the scraping history in the main content area.
+
+    profiles: {username: saved profile info} for names and pictures.
+    """
+    profiles = profiles or {}
+    st.markdown(AVATAR_CSS, unsafe_allow_html=True)
 
     # Inject CSS for colored run cards
     st.markdown("""
@@ -393,6 +451,10 @@ def render_history(post_runs, comment_runs, fetch_dataset_fn, fetch_items_fn, fe
             font-size: 14px;
             line-height: 1.4;
         }
+        .run-card { display: flex; align-items: center; gap: 12px; }
+        .run-card .run-avatars { display: flex; flex: none; }
+        .run-card .run-avatars .avatar + .avatar { margin-left: -12px; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.8); }
+        .run-card .run-fullname { font-weight: 400; opacity: 0.8; font-size: 13px; }
         .run-card .run-username {
             font-weight: 700;
             font-size: 15px;
@@ -422,13 +484,14 @@ def render_history(post_runs, comment_runs, fetch_dataset_fn, fetch_items_fn, fe
     tab_posts, tab_comments = st.tabs(["Posts Scraping", "Comments Scraping"])
 
     with tab_posts:
-        _render_run_list(post_runs, "posts", fetch_dataset_fn, fetch_items_fn, fetch_comments_fn)
+        _render_run_list(post_runs, "posts", fetch_dataset_fn, fetch_items_fn, fetch_comments_fn, profiles=profiles)
 
     with tab_comments:
-        _render_run_list(comment_runs, "comments", fetch_dataset_fn)
+        _render_run_list(comment_runs, "comments", fetch_dataset_fn, profiles=profiles)
 
 
-def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetch_comments_fn=None):
+def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetch_comments_fn=None, profiles=None):
+    profiles = profiles or {}
     if not runs:
         st.info(f"No {run_type} scraping history found.")
         return
@@ -460,10 +523,21 @@ def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetc
         else:
             card_class = "run-running"
 
+        run_profiles = run.get("profiles") or []
+        avatars = "".join(avatar_html(u, profiles.get(u), size=40) for u in run_profiles[:3]) or avatar_html("?", None, size=40)
+        full_name = (profiles.get(run_profiles[0]) or {}).get("fullName") if len(run_profiles) == 1 else ""
+        what = ""
+        if run_type == "comments":
+            n_posts = len((run.get("run_input") or {}).get("directUrls") or [])
+            what = f" — comments on {n_posts} post{'s' if n_posts != 1 else ''}" if n_posts else ""
         st.markdown(f"""
         <div class="run-card {card_class}">
-            <span class="run-username">{run['username']}</span><br>
-            <span class="run-meta">{started} — {status} — ${run['cost_usd']:.4f}</span>
+            <div class="run-avatars">{avatars}</div>
+            <div>
+                <span class="run-username">{html.escape(run_profiles_label(run))}</span>
+                {f'<span class="run-fullname"> · {html.escape(full_name)}</span>' if full_name else ''}<br>
+                <span class="run-meta">{started} — {status} — ${run['cost_usd']:.4f}{what}</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -507,7 +581,7 @@ def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetc
                         st.download_button(
                             label="Save CSV",
                             data=csv_data,
-                            file_name=f"{run_type}_{run['username']}_{run_id[:8]}.csv",
+                            file_name=f"{run_type}_{'_'.join(run.get('profiles') or [run['username']])[:60]}_{run_id[:8]}.csv",
                             mime="text/csv",
                             key=f"save_{run_type}_{run_id}_{i}",
                         )
@@ -539,7 +613,12 @@ def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetc
                             st.warning("No posts found in this dataset.")
                 else:
                     posts = st.session_state[posts_cache_key][run_id]
-                    selected_posts = render_post_picker(posts, key=f"hist_{run_id}", page_fallback=run["username"])
+                    owners = {(p.get("ownerUsername") or "").lower() for p in posts} - {""}
+                    selected_posts = render_post_picker(
+                        posts, key=f"hist_{run_id}",
+                        page_fallback=(run.get("profiles") or [None])[0],
+                        profiles={u: profiles.get(u) for u in owners | set(run.get("profiles") or [])},
+                    )
 
                     if selected_posts:
                         st.markdown("**Scrape comments from the selected posts**")
@@ -553,6 +632,7 @@ def _render_run_list(runs, run_type, fetch_dataset_fn, fetch_items_fn=None, fetc
                                     plan["per_post_limit"],
                                     include_replies=plan["include_replies"],
                                     max_charge_usd=plan["max_charge_usd"],
+                                    meta={"profiles": post_owners(selected_posts) or run.get("profiles") or []},
                                 )
 
                         if run_id in results:

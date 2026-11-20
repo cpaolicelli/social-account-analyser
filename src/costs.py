@@ -10,6 +10,7 @@ from apify_client import ApifyClient
 
 ACTOR_POST_SCRAPER = "apify/instagram-post-scraper"
 ACTOR_COMMENT_SCRAPER = "apify/instagram-comment-scraper"
+ACTOR_PROFILE_SCRAPER = "apify/instagram-profile-scraper"
 
 # Apify prices Store actors per subscription tier; FREE is the most expensive.
 DEFAULT_TIER = "FREE"
@@ -20,6 +21,7 @@ FALLBACK_PRICES = {
     (ACTOR_POST_SCRAPER, "post"): 0.0017,
     (ACTOR_POST_SCRAPER, "post-details"): 0.0010,
     (ACTOR_COMMENT_SCRAPER, "comment"): 0.0026,
+    (ACTOR_PROFILE_SCRAPER, "profile"): 0.0026,
 }
 
 PRICES_TTL = 6 * 3600
@@ -146,6 +148,10 @@ def comment_price():
     return get_event_price(ACTOR_COMMENT_SCRAPER, "comment")[0]
 
 
+def profile_price():
+    return get_event_price(ACTOR_PROFILE_SCRAPER, "profile")[0]
+
+
 def pricing_notes(actor_id, events):
     """Messages describing where the prices come from: [(level, text)], level "info" or "warning"."""
     tier, source = resolve_tier()
@@ -187,6 +193,13 @@ def plan_comment_scrape(posts, target_total):
         # More posts than comments wanted: one comment from each of the first posts.
         urls = [url for url, _ in candidates[:target_total]]
         return urls, 1, len(urls)
+
+    counts = [count for _, count in candidates]
+    if target_total >= sum(counts):
+        # More than Instagram reports: counts can be stale or leave out replies, so ask
+        # every post for an even share of the total (never less than its own count).
+        limit = max(max(counts), -(-target_total // len(candidates)))
+        return [url for url, _ in candidates], limit, sum(counts)
 
     def expected(limit):
         return sum(min(count, limit) for _, count in candidates)

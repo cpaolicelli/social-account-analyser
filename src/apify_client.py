@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 
 from src.costs import ACTOR_COMMENT_SCRAPER, ACTOR_POST_SCRAPER, get_api_token, to_charge_limit
+from src.profiles import write_run_meta
 
 
 def get_apify_client():
@@ -59,11 +60,12 @@ def fetch_instagram_posts(username_url, scan_params=None):
         st.error(f"Error fetching posts: {str(e)}")
         return [], 0, None
 
-def fetch_instagram_comments(post_urls, per_post_limit, include_replies=True, max_charge_usd=None):
+def fetch_instagram_comments(post_urls, per_post_limit, include_replies=True, max_charge_usd=None, meta=None):
     """Scrape comments from post URLs.
 
     per_post_limit is applied to each URL by the actor (see costs.plan_comment_scrape).
     max_charge_usd is a hard spending cap enforced by Apify; replies count toward it.
+    meta (e.g. {"profiles": [...]}) is saved with the run so the History can name it.
     """
     client = get_apify_client()
     if not client:
@@ -81,6 +83,8 @@ def fetch_instagram_comments(post_urls, per_post_limit, include_replies=True, ma
             max_total_charge_usd=to_charge_limit(max_charge_usd) if max_charge_usd else None,
         )
         dataset_items = client.dataset(run["defaultDatasetId"]).list_items().items
+        if meta and run.get("defaultKeyValueStoreId"):
+            write_run_meta(get_api_token(), run["defaultKeyValueStoreId"], meta)
 
         cost = _get_run_cost(client, run["id"])
 
@@ -130,7 +134,7 @@ def _clean_instagram_handle(url_or_handle):
 
 
 def _extract_run_details(token, run):
-    """Extract Instagram username and input config from a run.
+    """Extract Instagram username, input config and key-value store ID from a run.
 
     Runs in a worker thread, so it builds its own client and must not call st.*.
     """
@@ -146,21 +150,22 @@ def _extract_run_details(token, run):
             if record:
                 run_input = record.get("value", {}) or {}
 
-        # Post scraper uses "username" list, comment scraper uses "directUrls"
+        # Post scraper uses "username" list, comment scraper uses "directUrls".
+        # This is only a fallback label: profiles.resolve_run_profiles names the real profiles.
         usernames = run_input.get("username", [])
         if usernames and all(_POST_URL.match(u.strip()) for u in usernames):
-            return f"{len(usernames)} post URLs", run_input
+            return f"{len(usernames)} post URLs", run_input, kvs_id
         if usernames:
             clean_names = [_clean_instagram_handle(u) for u in usernames]
-            return ", ".join(clean_names), run_input
+            return ", ".join(clean_names), run_input, kvs_id
 
         direct_urls = run_input.get("directUrls", [])
         if direct_urls:
-            return f"{len(direct_urls)} post URLs", run_input
+            return f"{len(direct_urls)} post URLs", run_input, kvs_id
 
-        return "Unknown", run_input
+        return "Unknown", run_input, kvs_id
     except Exception:
-        return "Unknown", {}
+        return "Unknown", {}, run.get("defaultKeyValueStoreId")
 
 
 def fetch_actor_runs(actor_id, limit=50):
@@ -179,7 +184,7 @@ def fetch_actor_runs(actor_id, limit=50):
             details = list(pool.map(lambda r: _extract_run_details(token, r), runs))
 
         history = []
-        for run, (username, run_input) in zip(runs, details):
+        for run, (username, run_input, kvs_id) in zip(runs, details):
             history.append({
                 "run_id": run.get("id", ""),
                 "username": username,
@@ -188,6 +193,7 @@ def fetch_actor_runs(actor_id, limit=50):
                 "finished_at": run.get("finishedAt", ""),
                 "cost_usd": float(run.get("usageTotalUsd", 0) or 0),
                 "dataset_id": run.get("defaultDatasetId", ""),
+                "kvs_id": kvs_id,
                 "run_input": run_input,
             })
 
